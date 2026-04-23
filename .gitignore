@@ -1,0 +1,16 @@
+# Android
+.gradle/
+build/
+local.properties
+*.apk
+
+# Server (Node)
+node_modules/
+.env
+
+# VS Code
+.vscode/
+
+# System files
+.DS_Store
+Thumbs.db

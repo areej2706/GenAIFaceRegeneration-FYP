@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- Pencil2Pixel Theme Colors - Lavender & Wine -->
+    <color name="primary">#E6E6FA</color> <!-- Lavender background -->
+    <color name="secondary">#D8BFD8</color> <!-- Thistle -->
+    <color name="accent">#722F37</color> <!-- Wine/Dark Purple accent -->
+    <color name="success">#10B981</color>
+    <color name="error">#EF4444</color>
+    <color name="text_primary">#4A1942</color> <!-- Dark Purple/Wine text -->
+    <color name="text_secondary">#722F37</color> <!-- Wine secondary text -->
+    <color name="background">#E6E6FA</color> <!-- Lavender background -->
+
+    <!-- Additional UI Colors -->
+    <color name="card_background">#F0E6FA</color> <!-- Light lavender for cards -->
+    <color name="input_background">#F8F4FA</color> <!-- Very light lavender -->
+    <color name="input_border">#D8BFD8</color> <!-- Thistle border -->
+    <color name="input_border_focused">#722F37</color> <!-- Wine when focused -->
+    <color name="divider">#D8BFD8</color> <!-- Thistle divider -->
+    <color name="ripple">#33722F37</color> <!-- Wine with alpha for ripple -->
+</resources>

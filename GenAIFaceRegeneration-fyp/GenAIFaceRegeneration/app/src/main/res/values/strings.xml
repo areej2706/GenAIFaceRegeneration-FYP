@@ -1,0 +1,73 @@
+<resources>
+    <string name="app_name">GenAI Face Regeneration</string>
+    <string name="tagline">From Sketch to Reality</string>
+
+    <!-- Authentication -->
+    <string name="login">Login</string>
+    <string name="sign_up">Sign Up</string>
+    <string name="email">Email</string>
+    <string name="password">Password</string>
+    <string name="confirm_password">Confirm Password</string>
+    <string name="name">Name</string>
+    <string name="username">Username</string>
+    <string name="create_account">Create an account</string>
+    <string name="already_have_account">Already have an account?</string>
+    <string name="login_error">Invalid email or password</string>
+    <string name="signup_error">Please fill all fields correctly</string>
+    <string name="password_mismatch">Passwords do not match</string>
+    <string name="network_error">Network error. Please check your connection.</string>
+    <string name="username_email_exists">Username or email already exists</string>
+    <string name="logging_in">Logging in…</string>
+    <string name="signing_up">Creating account…</string>
+
+    <!-- Navigation -->
+    <string name="nav_home">Home</string>
+    <string name="nav_history">History</string>
+    <string name="nav_profile">Profile</string>
+
+    <!-- Home / Dashboard -->
+    <string name="picture_generation">Picture Generation</string>
+    <string name="welcome_back">Welcome back</string>
+
+    <!-- Convert Screen -->
+    <string name="upload_image">Upload Image</string>
+    <string name="tap_to_upload">Tap to select an image</string>
+    <string name="drag_drop">or drag and drop</string>
+    <string name="create_image">Create Image</string>
+    <string name="processing">Processing...</string>
+    <string name="save_to_history">Save</string>
+    <string name="download">Download</string>
+    <string name="image_to_sketch">Image → Sketch</string>
+
+    <!-- History -->
+    <string name="history_title">History</string>
+    <string name="no_history">No conversions yet</string>
+    <string name="delete">Delete</string>
+    <string name="sketch">Sketch</string>
+    <string name="image">Image</string>
+
+    <!-- Profile -->
+    <string name="profile_title">Profile</string>
+    <string name="images_processed">Images Processed</string>
+    <string name="view_history">View History</string>
+    <string name="logout">Logout</string>
+    <string name="logout_confirmation">Are you sure you want to logout?</string>
+    <string name="cancel">Cancel</string>
+    <string name="confirm">Confirm</string>
+
+    <!-- General -->
+    <string name="error">Error</string>
+    <string name="success">Success</string>
+    <string name="ok">OK</string>
+    <string name="back">Back</string>
+
+    <!-- NADRA Verification -->
+    <string name="verify_with_nadra">Verify</string>
+    <string name="nadra_verification_title">NADRA Verification</string>
+    <string name="nadra_verification_close">Close</string>
+
+    <!-- Full Image Viewer -->
+    <string name="full_image_view">Full image view</string>
+    <string name="close">Close</string>
+    <string name="download_to_gallery">Download to Gallery</string>
+</resources>

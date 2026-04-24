@@ -1,0 +1,10 @@
+flask
+flask-cors
+torch
+torchvision
+Pillow
+PyJWT
+gunicorn
+werkzeug
+sqlalchemy
+psycopg2-binary

@@ -1,0 +1,747 @@
+openapi: 3.0.3
+info:
+  title: Pencil2Pixel API
+  description: |
+    Convert pencil sketches into realistic images using AI-powered UNet Generator model.
+    
+    The API supports user authentication, single and batch image processing with customizable 
+    attributes, and maintains a history of generated images for each user.
+    
+    **Authentication:** Most endpoints require JWT token authentication.
+  version: 2.1.0
+  contact:
+    name: API Support
+    email: info.adnansultan@gmail.com
+
+servers:
+  - url: http://localhost:5000
+    description: Local development server
+  - url: http://0.0.0.0:5000
+    description: Local server (all interfaces)
+
+tags:
+  - name: Health
+    description: Service health and status endpoints
+  - name: Authentication
+    description: User authentication and profile management
+  - name: Generation
+    description: Image generation endpoints (requires authentication)
+  - name: History
+    description: Image history management (requires authentication)
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token obtained from signup or login
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message description
+      required:
+        - error
+    
+    User:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        email:
+          type: string
+          format: email
+      required:
+        - user_id
+        - username
+        - email
+    
+    ImageHistoryItem:
+      type: object
+      properties:
+        image_id:
+          type: string
+          format: uuid
+        original_filename:
+          type: string
+        attributes:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+security:
+  - BearerAuth: []
+
+paths:
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health Check
+      description: Check the API health status and device information (CPU/CUDA)
+      operationId: healthCheck
+      security: []
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                    description: Service status
+                  device:
+                    type: string
+                    example: cuda
+                    enum: [cpu, cuda]
+                    description: Device used for model inference
+              examples:
+                cuda:
+                  value:
+                    status: ok
+                    device: cuda
+                cpu:
+                  value:
+                    status: ok
+                    device: cpu
+
+  /auth/signup:
+    post:
+      tags:
+        - Authentication
+      summary: User Signup
+      description: Create a new user account
+      operationId: signup
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - username
+                - email
+                - password
+              properties:
+                username:
+                  type: string
+                  minLength: 3
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 6
+            example:
+              username: john_doe
+              email: john@example.com
+              password: securepass123
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  user:
+                    $ref: '#/components/schemas/User'
+                  token:
+                    type: string
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Username or email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/login:
+    post:
+      tags:
+        - Authentication
+      summary: User Login
+      description: Login to existing account
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+                - password
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+            example:
+              email: john@example.com
+              password: securepass123
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  user:
+                    $ref: '#/components/schemas/User'
+                  token:
+                    type: string
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /auth/profile:
+    get:
+      tags:
+        - Authentication
+      summary: Get Profile
+      description: Get current user profile information
+      operationId: getProfile
+      responses:
+        '200':
+          description: Profile retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    allOf:
+                      - $ref: '#/components/schemas/User'
+                      - type: object
+                        properties:
+                          created_at:
+                            type: string
+                            format: date-time
+                          total_images:
+                            type: integer
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    
+    put:
+      tags:
+        - Authentication
+      summary: Update Profile
+      description: Update user profile information
+      operationId: updateProfile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 6
+            example:
+              username: new_username
+              email: newemail@example.com
+      responses:
+        '200':
+          description: Profile updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  user:
+                    $ref: '#/components/schemas/User'
+        '400':
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Username or email already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /generate:
+    post:
+      tags:
+        - Generation
+      summary: Generate Single Image
+      description: |
+        Convert a single pencil sketch to a realistic image using the UNet Generator model.
+        
+        Upload an image file and optionally provide 20 comma-separated integer attribute values
+        via the `attributes` parameter. Attributes are retained for API compatibility but have
+        no measurable effect on the generated output due to InstanceNorm in the model architecture.
+      operationId: generateImage
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - image
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: Pencil sketch image file (PNG, JPG, etc.)
+                attributes:
+                  type: string
+                  pattern: '^(-?\d+,){19}-?\d+$'
+                  example: "1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0"
+                  description: 20 comma-separated integer values (retained for compatibility, no effect on output)
+                format:
+                  type: string
+                  enum: [image, base64]
+                  default: image
+                  description: Response format - 'image' returns PNG file, 'base64' returns JSON
+                save:
+                  type: string
+                  enum: ['true', 'false']
+                  default: 'false'
+                  description: Set to 'true' to save image to history
+                quality:
+                  type: string
+                  enum: [low, medium, high, ultra]
+                  default: medium
+                  description: Quality preset for post-processing
+                upscale:
+                  type: string
+                  enum: ['true', 'false']
+                  default: 'false'
+                  description: Set to 'true' to upscale output to 512x512
+            examples:
+              minimal:
+                summary: Generate with defaults
+                value:
+                  image: <binary>
+                  format: base64
+                  save: 'true'
+              withAttributes:
+                summary: Generate with raw attribute values
+                value:
+                  image: <binary>
+                  attributes: "1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0"
+                  format: image
+      responses:
+        '200':
+          description: Image generated successfully
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+                description: Generated PNG image (when format=image)
+            application/json:
+              schema:
+                type: object
+                properties:
+                  image:
+                    type: string
+                    description: Base64-encoded PNG image
+                  format:
+                    type: string
+                    example: base64
+                  quality:
+                    type: string
+                    example: medium
+                  size:
+                    type: array
+                    items:
+                      type: integer
+                    example: [256, 256]
+                  image_id:
+                    type: string
+                    format: uuid
+                    description: Image ID (only when save=true)
+                  saved:
+                    type: boolean
+                    description: Whether image was saved (only when save=true)
+              examples:
+                base64Response:
+                  value:
+                    image: "iVBORw0KGgoAAAANSUhEUgAAAAE..."
+                    format: base64
+                    quality: medium
+                    size: [256, 256]
+        '400':
+          description: Bad request - missing or invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                noImage:
+                  value:
+                    error: "No image file provided"
+                emptyFilename:
+                  value:
+                    error: "Empty filename"
+                invalidAttributes:
+                  value:
+                    error: "Attributes must be 20 values"
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error during processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /generate-batch:
+    post:
+      tags:
+        - Generation
+      summary: Generate Batch Images
+      description: |
+        Convert multiple pencil sketches to realistic images in a single request.
+        
+        Upload multiple image files and receive base64-encoded results for all images.
+        The same attribute values are applied to all images in the batch.
+      operationId: generateBatchImages
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - images
+              properties:
+                images:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                  description: Multiple pencil sketch image files
+                attributes:
+                  type: string
+                  pattern: '^(-?\d+,){19}-?\d+$'
+                  example: "1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0"
+                  description: 20 comma-separated integer values applied to all images
+                save:
+                  type: string
+                  enum: ['true', 'false']
+                  default: 'false'
+                  description: Set to 'true' to save all images to history
+            examples:
+              batchRequest:
+                summary: Batch generation request
+                value:
+                  images: [<binary1>, <binary2>, <binary3>]
+                  attributes: "1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0"
+                  save: 'true'
+      responses:
+        '200':
+          description: Images generated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        filename:
+                          type: string
+                          description: Original filename
+                        image:
+                          type: string
+                          description: Base64-encoded PNG image
+                        image_id:
+                          type: string
+                          format: uuid
+                          description: Image ID (only when save=true)
+                        saved:
+                          type: boolean
+                          description: Whether image was saved (only when save=true)
+                  count:
+                    type: integer
+                    description: Number of images generated
+              examples:
+                batchResponse:
+                  value:
+                    results:
+                      - filename: "sketch1.png"
+                        image: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAY..."
+                        image_id: "550e8400-e29b-41d4-a716-446655440000"
+                        saved: true
+                      - filename: "sketch2.png"
+                        image: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAY..."
+                        image_id: "660e8400-e29b-41d4-a716-446655440001"
+                        saved: true
+                    count: 2
+        '400':
+          description: Bad request - missing or invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error during processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /history:
+    get:
+      tags:
+        - History
+      summary: Get History
+      description: Get paginated list of user's generated images
+      operationId: getHistory
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+          description: Page number
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+          description: Items per page
+      responses:
+        '200':
+          description: History retrieved successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  images:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ImageHistoryItem'
+                  pagination:
+                    type: object
+                    properties:
+                      page:
+                        type: integer
+                      limit:
+                        type: integer
+                      total:
+                        type: integer
+                      pages:
+                        type: integer
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    
+    delete:
+      tags:
+        - History
+      summary: Clear History
+      description: Delete all images from user's history
+      operationId: clearHistory
+      responses:
+        '200':
+          description: History cleared successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  deleted_count:
+                    type: integer
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /history/{image_id}:
+    get:
+      tags:
+        - History
+      summary: Get History Image
+      description: Download a specific generated image from history
+      operationId: getHistoryImage
+      parameters:
+        - name: image_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Image retrieved successfully
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Image not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    
+    delete:
+      tags:
+        - History
+      summary: Delete History Image
+      description: Delete a specific image from history
+      operationId: deleteHistoryImage
+      parameters:
+        - name: image_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Image deleted successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Image not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error during processing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+    HealthResponse:
+      value:
+        status: ok
+        device: cuda
+    
+    GenerateBase64Response:
+      value:
+        image: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        format: base64
+    
+    BatchResponse:
+      value:
+        results:
+          - filename: "sketch1.png"
+            image: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAY..."
+          - filename: "sketch2.png"
+            image: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAY..."
+        count: 2
+
+x-model-info:
+  architecture: UNet Generator
+  input-size: 256x256
+  attribute-dimensions: 20
+  default-attributes: "1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0"
+  normalization: "[-1, 1]"
+  output-format: RGB PNG
+  database: SQLite (pencil2pixel.db)
+  authentication: JWT (7 days expiration)

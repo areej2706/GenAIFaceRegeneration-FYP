@@ -1,0 +1,38 @@
+{
+  "workspace": {
+    "id": "0bdc4ab2-6b2a-4db4-88c3-bf64297a9631",
+    "name": "Pencil2Pixel API Testing"
+  },
+  "collection": {
+    "id": "f1c6bf23-f7b1-48ea-81a6-f2ee2f55264e",
+    "uid": "36310029-f1c6bf23-f7b1-48ea-81a6-f2ee2f55264e",
+    "name": "Pencil2Pixel API"
+  },
+  "environment": {
+    "id": "da7926c8-fc09-471e-8653-98d71763bf92",
+    "uid": "36310029-da7926c8-fc09-471e-8653-98d71763bf92",
+    "name": "Local Development"
+  },
+  "endpoints": {
+    "health": {
+      "method": "GET",
+      "path": "/health",
+      "description": "Check API health and device status"
+    },
+    "generate": {
+      "method": "POST",
+      "path": "/generate",
+      "description": "Convert single pencil sketch to realistic image"
+    },
+    "generateBatch": {
+      "method": "POST",
+      "path": "/generate-batch",
+      "description": "Convert multiple pencil sketches in batch"
+    }
+  },
+  "baseUrl": "http://localhost:5000",
+  "documentation": {
+    "markdown": "API_DOCUMENTATION.md",
+    "openapi": "openapi.yaml"
+  }
+}

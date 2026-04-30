@@ -38,36 +38,54 @@ POST /generate
 
 **Parameters:**
 - `image` (file, required): Sketch image file
-- `attributes` (string, optional): 20 comma-separated binary values (e.g., "1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0")
+- `attributes` (string, optional): 4 comma-separated float values for tone controls (e.g., "0.25,0.75,0.33,0.33")
+  - Values: skin_tone, hair_tone, eye_tone, lip_tone (each 0.0-1.0)
 - `format` (string, optional): "image" (default) or "base64"
+- `quality` (string, optional): "low", "medium" (default), "high", or "ultra"
+- `upscale` (boolean, optional): "true" to upscale to 1024x1024, "false" (default)
+- `save` (boolean, optional): "true" to save to history, "false" (default)
 
 **Example (cURL - returns image):**
 ```bash
 curl -X POST http://localhost:5000/generate \
+  -H "Authorization: Bearer YOUR_TOKEN" \
   -F "image=@sketch.jpg" \
-  -F "attributes=1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0" \
+  -F "quality=high" \
+  -F "upscale=true" \
   --output result.png
 ```
 
-**Example (cURL - returns base64):**
+**Example (cURL - with attributes):**
 ```bash
 curl -X POST http://localhost:5000/generate \
+  -H "Authorization: Bearer YOUR_TOKEN" \
   -F "image=@sketch.jpg" \
-  -F "format=base64" \
-  -F "attributes=1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0"
+  -F "attributes=0.25,0.75,0.33,0.33" \
+  -F "format=base64"
 ```
 
 **Example (Python):**
 ```python
 import requests
 
+# Login first
+response = requests.post('http://localhost:5000/auth/login', json={
+    'email': 'user@example.com',
+    'password': 'password123'
+})
+token = response.json()['token']
+headers = {'Authorization': f'Bearer {token}'}
+
+# Generate image
 with open('sketch.jpg', 'rb') as f:
     files = {'image': f}
     data = {
-        'attributes': '1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0',
+        'quality': 'high',
+        'upscale': 'true',
         'format': 'image'
     }
-    response = requests.post('http://localhost:5000/generate', files=files, data=data)
+    response = requests.post('http://localhost:5000/generate', 
+                            files=files, data=data, headers=headers)
     
     with open('output.png', 'wb') as out:
         out.write(response.content)
@@ -80,7 +98,10 @@ POST /generate-batch
 
 **Parameters:**
 - `images` (files, required): Multiple sketch image files
-- `attributes` (string, optional): 20 comma-separated binary values (applied to all images)
+- `attributes` (string, optional): 4 comma-separated float values (applied to all images)
+- `quality` (string, optional): "low", "medium" (default), "high", or "ultra"
+- `upscale` (boolean, optional): "true" to upscale to 1024x1024
+- `save` (boolean, optional): "true" to save to history
 
 **Response:**
 ```json
@@ -98,16 +119,62 @@ POST /generate-batch
 **Example (cURL):**
 ```bash
 curl -X POST http://localhost:5000/generate-batch \
+  -H "Authorization: Bearer YOUR_TOKEN" \
   -F "images=@sketch1.jpg" \
   -F "images=@sketch2.jpg" \
-  -F "attributes=1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0"
+  -F "quality=high"
+```
+
+## Authentication
+
+The API uses JWT-based authentication. Most endpoints require a valid token.
+
+### Signup
+```bash
+POST /auth/signup
+Content-Type: application/json
+
+{
+  "username": "john_doe",
+  "email": "john@example.com",
+  "password": "password123"
+}
+```
+
+### Login
+```bash
+POST /auth/login
+Content-Type: application/json
+
+{
+  "email": "john@example.com",
+  "password": "password123"
+}
+```
+
+Returns a JWT token valid for 7 days. Include in subsequent requests:
+```
+Authorization: Bearer YOUR_TOKEN
 ```
 
 ## Attributes
 
-The model accepts 20 binary attributes (0 or 1) that control facial features. Common attributes in face datasets:
-- Gender, age, hair color, glasses, smile, etc.
-- If not provided, defaults to all zeros
+The new model uses 4 floating-point tone attributes (optional):
+- **skin_tone** (0.0-1.0): Skin tone control
+- **hair_tone** (0.0-1.0): Hair tone control
+- **eye_tone** (0.0-1.0): Eye tone control
+- **lip_tone** (0.0-1.0): Lip tone control
+
+If not provided, the model uses zero values and generates images based purely on the sketch input.
+
+## Quality Presets
+
+- **low**: Basic output (512x512)
+- **medium**: Moderate sharpening and enhancement (default)
+- **high**: Strong sharpening and color boost
+- **ultra**: Maximum enhancement
+
+Add `upscale=true` to get 1024x1024 output with high-quality resampling.
 
 ## Testing
 
@@ -123,6 +190,7 @@ Edit `test_api.py` to uncomment and test specific endpoints with your images.
 **For mobile apps (React Native, Flutter, etc.):**
 - Use multipart/form-data for image upload
 - Set `format=base64` to receive base64 string
+- Include JWT token in Authorization header
 - Decode base64 to display image
 
 **Example (JavaScript/React Native):**
@@ -133,11 +201,14 @@ formData.append('image', {
   type: 'image/jpeg',
   name: 'sketch.jpg'
 });
-formData.append('attributes', '1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0');
+formData.append('quality', 'high');
 formData.append('format', 'base64');
 
 fetch('http://localhost:5000/generate', {
   method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${token}`
+  },
   body: formData
 })
 .then(res => res.json())
@@ -156,4 +227,3 @@ gunicorn -w 4 -b 0.0.0.0:5000 app:app
 ```
 
 Or use Docker, AWS Lambda, Google Cloud Run, etc.
-# pencil2pexel-server

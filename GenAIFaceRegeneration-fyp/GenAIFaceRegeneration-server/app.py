@@ -7,114 +7,186 @@ from PIL import Image, ImageEnhance, ImageFilter
 import io
 import base64
 import os
+import numpy as np
+import cv2
 from datetime import datetime, timedelta
 from functools import wraps
 import jwt
+import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
 import uuid
 
-# Import database configuration
-from database import init_db, get_db, close_db, User, ImageHistory
+# Apply GFPGAN compatibility patch for newer torchvision
+try:
+    import fix_gfpgan
+except:
+    pass
 
 app = Flask(__name__)
 CORS(app)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'your-secret-key-change-in-production')
+app.config['DATABASE'] = 'pencil2pixel.db'
 
 # Quality enhancement settings
 QUALITY_PRESETS = {
-    'low': {'resolution': 256, 'sharpen': 1.0, 'enhance': 1.0},
-    'medium': {'resolution': 256, 'sharpen': 1.3, 'enhance': 1.1},
-    'high': {'resolution': 256, 'sharpen': 1.5, 'enhance': 1.2},
-    'ultra': {'resolution': 256, 'sharpen': 1.8, 'enhance': 1.3}
+    'low': {'resolution': 512, 'sharpen': 1.0, 'enhance': 1.0},
+    'medium': {'resolution': 512, 'sharpen': 1.3, 'enhance': 1.1},
+    'high': {'resolution': 512, 'sharpen': 1.5, 'enhance': 1.2},
+    'ultra': {'resolution': 512, 'sharpen': 1.8, 'enhance': 1.3}
 }
 
-# Default attributes (fixed - attributes have no effect on inference due to InstanceNorm)
-# NOTE: the pretrained model expects 4 attribute channels (attr_dim=4).
-DEFAULT_ATTRIBUTES = [1, 0, 1, 0]
+# Default attributes for 4-channel model (4 tone controls: skin, hair, eye, lip)
+DEFAULT_ATTRIBUTES = [0.25, 0.75, 0.33, 0.33]
 
 # --- MODEL ARCHITECTURE ---
-class UNetGenerator(nn.Module):
+class SketchToImageGenerator(nn.Module):
     def __init__(self, attr_dim=4):
-        super(UNetGenerator, self).__init__()
+        super().__init__()
         
-        def down_block(in_c, out_c, normalize=True, dropout=0.0):
-            layers = [nn.Conv2d(in_c, out_c, 4, 2, 1, bias=False)]
-            if normalize:
-                layers.append(nn.InstanceNorm2d(out_c))
-            layers.append(nn.LeakyReLU(0.2, inplace=True))
-            if dropout > 0:
-                layers.append(nn.Dropout(dropout))
-            return nn.Sequential(*layers)
+        def down(i, o, n=True):
+            l = [nn.Conv2d(i, o, 4, 2, 1, bias=False)]
+            if n: l.append(nn.InstanceNorm2d(o))
+            l.append(nn.LeakyReLU(0.2, True))
+            return nn.Sequential(*l)
         
-        def up_block(in_c, out_c, dropout=0.0):
-            layers = [
-                nn.ConvTranspose2d(in_c, out_c, 4, 2, 1, bias=False),
-                nn.InstanceNorm2d(out_c),
-                nn.ReLU(inplace=True)
-            ]
-            if dropout > 0:
-                layers.append(nn.Dropout(dropout))
-            return nn.Sequential(*layers)
+        def up(i, o, dr=0.0):
+            l = [nn.ConvTranspose2d(i, o, 4, 2, 1, bias=False), nn.InstanceNorm2d(o), nn.ReLU(True)]
+            if dr: l.append(nn.Dropout(dr))
+            return nn.Sequential(*l)
         
-        # Encoder (named to match checkpoint keys)
-        self.d1 = down_block(3, 64, normalize=False)
-        self.d2 = down_block(64, 128)
-        self.d3 = down_block(128, 256)
-        self.d4 = down_block(256, 512)
-        self.d5 = down_block(512, 512)
-        self.d6 = down_block(512, 512)
-        self.d7 = down_block(512, 512)
-        self.d8 = down_block(512, 512, normalize=False)
+        # Configured for 4-channels (RGB Sketch + 1-ch Mask)
+        self.d1 = down(4, 64, False)
+        self.d2, self.d3, self.d4 = down(64, 128), down(128, 256), down(256, 512)
+        self.d5, self.d6, self.d7, self.d8 = down(512, 512), down(512, 512), down(512, 512), down(512, 512, False)
         
-        # Decoder
-        self.up1 = up_block(512 + attr_dim, 512, dropout=0.5)
-        self.up2 = up_block(1024, 512, dropout=0.5)
-        self.up3 = up_block(1024, 512, dropout=0.5)
-        self.up4 = up_block(1024, 512)
-        self.up5 = up_block(1024, 256)
-        self.up6 = up_block(512, 128)
-        self.up7 = up_block(256, 64)
+        self.up1 = up(512 + attr_dim, 512, 0.5)
+        self.up2, self.up3, self.up4 = up(1024, 512, 0.5), up(1024, 512, 0.5), up(1024, 512)
+        self.up5, self.up6, self.up7 = up(1024, 256), up(512, 128), up(256, 64)
+        
         self.final = nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
-            nn.InstanceNorm2d(128),
-            nn.Conv2d(128, 3, 4, stride=1, padding=1, bias=True),
+            nn.Upsample(scale_factor=2),
+            nn.ZeroPad2d((1, 0, 1, 0)),
+            nn.Conv2d(128, 3, 4, padding=1),
             nn.Tanh()
         )
     
-    def forward(self, x, attr):
+    def forward(self, s, m, a):
+        x = torch.cat([s, m], dim=1)  # 4-Channel Fusion
         d1 = self.d1(x); d2 = self.d2(d1); d3 = self.d3(d2); d4 = self.d4(d3)
         d5 = self.d5(d4); d6 = self.d6(d5); d7 = self.d7(d6); d8 = self.d8(d7)
         
-        attr = attr.view(attr.size(0), attr.size(1), 1, 1)
-        d8_cat = torch.cat([d8, attr], dim=1)
+        a_exp = a.view(a.size(0), -1, 1, 1).expand(-1, -1, d8.size(2), d8.size(3))
+        u1 = self.up1(torch.cat([d8, a_exp], 1))
+        u2 = self.up2(torch.cat([u1, d7], 1)); u3 = self.up3(torch.cat([u2, d6], 1))
+        u4 = self.up4(torch.cat([u3, d5], 1)); u5 = self.up5(torch.cat([u4, d4], 1))
+        u6 = self.up6(torch.cat([u5, d3], 1)); u7 = self.up7(torch.cat([u6, d2], 1))
         
-        u1 = torch.cat([self.up1(d8_cat), d7], dim=1)
-        u2 = torch.cat([self.up2(u1), d6], dim=1)
-        u3 = torch.cat([self.up3(u2), d5], dim=1)
-        u4 = torch.cat([self.up4(u3), d4], dim=1)
-        u5 = torch.cat([self.up5(u4), d3], dim=1)
-        u6 = torch.cat([self.up6(u5), d2], dim=1)
-        u7 = torch.cat([self.up7(u6), d1], dim=1)
-        
-        return self.final(u7)
+        return self.final(torch.cat([u7, d1], 1))
 
 # --- LOAD MODEL ---
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = UNetGenerator().to(device)
-model.load_state_dict(torch.load('model/pencil2pixel.pth', map_location=device))
+
+# First, check the model checkpoint to determine attr_dim
+checkpoint_path = 'model/pencil2pixel.pth'
+if os.path.exists(checkpoint_path):
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    
+    # Determine attr_dim from the checkpoint
+    # up1 is ConvTranspose2d with weight shape [in_channels, out_channels, kernel_h, kernel_w]
+    # In forward pass: up1(torch.cat([d8, a_exp], 1)) where d8 has 512 channels
+    # So: up1 in_channels = 512 + attr_dim
+    if 'up1.0.weight' in checkpoint:
+        up1_in_channels = checkpoint['up1.0.weight'].shape[0]  # First dim is in_channels for ConvTranspose2d
+        d8_channels = 512
+        attr_dim = up1_in_channels - d8_channels
+        print(f"Detected attr_dim from checkpoint: {attr_dim}")
+    else:
+        attr_dim = 4  # Default fallback
+        print(f"Could not detect attr_dim, using default: {attr_dim}")
+else:
+    attr_dim = 4
+    print(f"Checkpoint not found, using default attr_dim: {attr_dim}")
+
+# Create model with correct attr_dim
+model = SketchToImageGenerator(attr_dim=attr_dim).to(device)
+
+# Load checkpoint with 4-channel adaptation
+if os.path.exists(checkpoint_path):
+    # Surgery: Adapting 3-channel weights to 4-channel model if needed
+    if 'd1.0.weight' in checkpoint and checkpoint['d1.0.weight'].shape[1] == 3:
+        old_weight = checkpoint['d1.0.weight']
+        new_channel = torch.mean(old_weight, dim=1, keepdim=True)
+        checkpoint['d1.0.weight'] = torch.cat([old_weight, new_channel], dim=1)
+    
+    model.load_state_dict(checkpoint, strict=False)
+    print(f"Model loaded successfully with attr_dim={attr_dim}")
+else:
+    print(f"Warning: Model file not found at {checkpoint_path}")
+
 model.eval()
 
 transform = T.Compose([
-    T.Resize((256, 256)),
+    T.Resize((512, 512)),
     T.ToTensor(),
     T.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 ])
 
+# --- LOAD GFPGAN ENHANCER ---
+gfpgan_available = False
+gfpgan_restorer = None
+
+try:
+    from gfpgan import GFPGANer
+    
+    # Initialize GFPGAN
+    gfpgan_restorer = GFPGANer(
+        model_path='https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.3.pth',
+        upscale=1,
+        arch='clean',
+        channel_multiplier=2,
+        bg_upsampler=None,
+        device=device
+    )
+    print("✓ GFPGAN enhancer loaded successfully")
+    gfpgan_available = True
+except ImportError as e:
+    print(f"⚠ GFPGAN import error: {e}")
+    print("  GFPGAN enhancement disabled - using PIL enhancement only")
+except Exception as e:
+    print(f"⚠ GFPGAN initialization error: {e}")
+    print("  GFPGAN enhancement disabled - using PIL enhancement only")
+
 # --- IMAGE ENHANCEMENT FUNCTIONS ---
-def enhance_output_image(img, quality='medium'):
+def enhance_output_image(img, quality='medium', use_gfpgan=True):
     """
     Apply post-processing enhancements to improve output quality
+    If GFPGAN is available and use_gfpgan=True, use GFPGAN, otherwise use PIL
     """
+    if use_gfpgan and gfpgan_available:
+        # Use GFPGAN enhancement
+        try:
+            # Convert PIL to numpy array in BGR format for GFPGAN
+            img_np = np.array(img)
+            img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+            
+            # Apply GFPGAN
+            _, _, restored_img = gfpgan_restorer.enhance(
+                img_bgr, 
+                has_aligned=False, 
+                only_center_face=False, 
+                paste_back=True
+            )
+            
+            # Convert back to PIL RGB
+            restored_rgb = cv2.cvtColor(restored_img, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(restored_rgb)
+            
+            return img
+        except Exception as e:
+            print(f"GFPGAN enhancement failed: {e}, falling back to PIL")
+            # Fall through to PIL enhancement
+    
+    # PIL-based enhancement (fallback or when GFPGAN disabled)
     preset = QUALITY_PRESETS.get(quality, QUALITY_PRESETS['medium'])
     
     # 1. Sharpen the image
@@ -153,6 +225,51 @@ def preprocess_input_image(img):
     
     return img
 
+def create_mask_from_sketch(img, threshold=250):
+    """
+    Create binary mask from sketch image
+    White areas (background) = 0, Dark areas (sketch) = 1
+    """
+    gray_np = np.array(img.convert('L').resize((512, 512)))
+    mask_np = np.where(gray_np < threshold, 1.0, 0.0)
+    return mask_np
+
+# --- DATABASE SETUP ---
+def init_db():
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    
+    # Users table
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT UNIQUE NOT NULL,
+        username TEXT UNIQUE NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    # Image history table
+    c.execute('''CREATE TABLE IF NOT EXISTS image_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        image_id TEXT UNIQUE NOT NULL,
+        user_id TEXT NOT NULL,
+        original_filename TEXT,
+        generated_image BLOB NOT NULL,
+        attributes TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (user_id) ON DELETE CASCADE
+    )''')
+    
+    conn.commit()
+    conn.close()
+
+def get_db():
+    conn = sqlite3.connect(app.config['DATABASE'])
+    conn.row_factory = sqlite3.Row
+    return conn
+
 # Initialize database on startup
 init_db()
 
@@ -184,7 +301,6 @@ def token_required(f):
 # --- AUTHENTICATION ENDPOINTS ---
 @app.route('/auth/signup', methods=['POST'])
 def signup():
-    db = get_db()
     try:
         data = request.get_json()
         
@@ -195,30 +311,27 @@ def signup():
         email = data['email']
         password = data['password']
         
+        # Validate password length
         if len(password) < 6:
             return jsonify({'error': 'Password must be at least 6 characters'}), 400
         
-        # Check if user exists
-        existing_user = db.query(User).filter(
-            (User.username == username) | (User.email == email)
-        ).first()
+        conn = get_db()
+        c = conn.cursor()
         
-        if existing_user:
+        # Check if user already exists
+        c.execute('SELECT * FROM users WHERE username = ? OR email = ?', (username, email))
+        if c.fetchone():
+            conn.close()
             return jsonify({'error': 'Username or email already exists'}), 409
         
         # Create new user
         user_id = str(uuid.uuid4())
         password_hash = generate_password_hash(password)
         
-        new_user = User(
-            user_id=user_id,
-            username=username,
-            email=email,
-            password_hash=password_hash
-        )
-        
-        db.add(new_user)
-        db.commit()
+        c.execute('INSERT INTO users (user_id, username, email, password_hash) VALUES (?, ?, ?, ?)',
+                  (user_id, username, email, password_hash))
+        conn.commit()
+        conn.close()
         
         # Generate token
         token = jwt.encode({
@@ -237,14 +350,10 @@ def signup():
         }), 201
     
     except Exception as e:
-        db.rollback()
         return jsonify({'error': str(e)}), 500
-    finally:
-        close_db(db)
 
 @app.route('/auth/login', methods=['POST'])
 def login():
-    db = get_db()
     try:
         data = request.get_json()
         
@@ -254,138 +363,165 @@ def login():
         email = data['email']
         password = data['password']
         
-        user = db.query(User).filter(User.email == email).first()
+        conn = get_db()
+        c = conn.cursor()
         
-        if not user or not check_password_hash(user.password_hash, password):
+        c.execute('SELECT * FROM users WHERE email = ?', (email,))
+        user = c.fetchone()
+        conn.close()
+        
+        if not user or not check_password_hash(user['password_hash'], password):
             return jsonify({'error': 'Invalid email or password'}), 401
         
         # Generate token
         token = jwt.encode({
-            'user_id': user.user_id,
+            'user_id': user['user_id'],
             'exp': datetime.utcnow() + timedelta(days=7)
         }, app.config['SECRET_KEY'], algorithm='HS256')
         
         return jsonify({
             'message': 'Login successful',
             'user': {
-                'user_id': user.user_id,
-                'username': user.username,
-                'email': user.email
+                'user_id': user['user_id'],
+                'username': user['username'],
+                'email': user['email']
             },
             'token': token
         }), 200
     
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    finally:
-        close_db(db)
 
 @app.route('/auth/profile', methods=['GET'])
 @token_required
 def get_profile(current_user_id):
-    db = get_db()
     try:
-        user = db.query(User).filter(User.user_id == current_user_id).first()
+        conn = get_db()
+        c = conn.cursor()
+        
+        c.execute('SELECT user_id, username, email, created_at FROM users WHERE user_id = ?', (current_user_id,))
+        user = c.fetchone()
+        
+        # Get image count
+        c.execute('SELECT COUNT(*) as count FROM image_history WHERE user_id = ?', (current_user_id,))
+        image_count = c.fetchone()['count']
+        
+        conn.close()
         
         if not user:
             return jsonify({'error': 'User not found'}), 404
         
-        image_count = db.query(ImageHistory).filter(ImageHistory.user_id == current_user_id).count()
-        
         return jsonify({
             'user': {
-                'user_id': user.user_id,
-                'username': user.username,
-                'email': user.email,
-                'created_at': user.created_at.isoformat() if user.created_at else None,
+                'user_id': user['user_id'],
+                'username': user['username'],
+                'email': user['email'],
+                'created_at': user['created_at'],
                 'total_images': image_count
             }
         }), 200
     
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    finally:
-        close_db(db)
 
 @app.route('/auth/profile', methods=['PUT'])
 @token_required
 def update_profile(current_user_id):
-    db = get_db()
     try:
         data = request.get_json()
         
         if not data:
             return jsonify({'error': 'No data provided'}), 400
         
-        user = db.query(User).filter(User.user_id == current_user_id).first()
+        conn = get_db()
+        c = conn.cursor()
         
-        if not user:
-            return jsonify({'error': 'User not found'}), 404
+        updates = []
+        params = []
         
         if 'username' in data:
-            existing = db.query(User).filter(
-                User.username == data['username'],
-                User.user_id != current_user_id
-            ).first()
-            if existing:
+            # Check if username already exists
+            c.execute('SELECT * FROM users WHERE username = ? AND user_id != ?', (data['username'], current_user_id))
+            if c.fetchone():
+                conn.close()
                 return jsonify({'error': 'Username already exists'}), 409
-            user.username = data['username']
+            updates.append('username = ?')
+            params.append(data['username'])
         
         if 'email' in data:
-            existing = db.query(User).filter(
-                User.email == data['email'],
-                User.user_id != current_user_id
-            ).first()
-            if existing:
+            # Check if email already exists
+            c.execute('SELECT * FROM users WHERE email = ? AND user_id != ?', (data['email'], current_user_id))
+            if c.fetchone():
+                conn.close()
                 return jsonify({'error': 'Email already exists'}), 409
-            user.email = data['email']
+            updates.append('email = ?')
+            params.append(data['email'])
         
         if 'password' in data:
             if len(data['password']) < 6:
+                conn.close()
                 return jsonify({'error': 'Password must be at least 6 characters'}), 400
-            user.password_hash = generate_password_hash(data['password'])
+            updates.append('password_hash = ?')
+            params.append(generate_password_hash(data['password']))
         
-        user.updated_at = datetime.utcnow()
-        db.commit()
+        if not updates:
+            conn.close()
+            return jsonify({'error': 'No valid fields to update'}), 400
+        
+        updates.append('updated_at = CURRENT_TIMESTAMP')
+        params.append(current_user_id)
+        
+        query = f"UPDATE users SET {', '.join(updates)} WHERE user_id = ?"
+        c.execute(query, params)
+        conn.commit()
+        
+        c.execute('SELECT user_id, username, email, updated_at FROM users WHERE user_id = ?', (current_user_id,))
+        user = c.fetchone()
+        conn.close()
         
         return jsonify({
             'message': 'Profile updated successfully',
             'user': {
-                'user_id': user.user_id,
-                'username': user.username,
-                'email': user.email,
-                'updated_at': user.updated_at.isoformat()
+                'user_id': user['user_id'],
+                'username': user['username'],
+                'email': user['email'],
+                'updated_at': user['updated_at']
             }
         }), 200
     
     except Exception as e:
-        db.rollback()
         return jsonify({'error': str(e)}), 500
-    finally:
-        close_db(db)
 
 # --- IMAGE HISTORY ENDPOINTS ---
 @app.route('/history', methods=['GET'])
 @token_required
 def get_history(current_user_id):
-    db = get_db()
     try:
         page = request.args.get('page', 1, type=int)
         limit = request.args.get('limit', 10, type=int)
         offset = (page - 1) * limit
         
-        images = db.query(ImageHistory).filter(
-            ImageHistory.user_id == current_user_id
-        ).order_by(ImageHistory.created_at.desc()).limit(limit).offset(offset).all()
+        conn = get_db()
+        c = conn.cursor()
         
-        total = db.query(ImageHistory).filter(ImageHistory.user_id == current_user_id).count()
+        c.execute('''SELECT image_id, original_filename, attributes, created_at 
+                     FROM image_history 
+                     WHERE user_id = ? 
+                     ORDER BY created_at DESC 
+                     LIMIT ? OFFSET ?''', (current_user_id, limit, offset))
+        images = c.fetchall()
+        
+        c.execute('SELECT COUNT(*) as total FROM image_history WHERE user_id = ?', (current_user_id,))
+        total = c.fetchone()['total']
+        
+        conn.close()
         
         return jsonify({
             'images': [{
-                'image_id': img.image_id,
-                'original_filename': img.original_filename,
-                'attributes': img.attributes,
-                'created_at': img.created_at.isoformat() if img.created_at else None
+                'image_id': img['image_id'],
+                'original_filename': img['original_filename'],
+                'attributes': img['attributes'],
+                'created_at': img['created_at']
             } for img in images],
             'pagination': {
                 'page': page,
@@ -397,68 +533,64 @@ def get_history(current_user_id):
     
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    finally:
-        close_db(db)
 
 @app.route('/history/<image_id>', methods=['GET'])
 @token_required
 def get_history_image(current_user_id, image_id):
-    db = get_db()
     try:
-        image = db.query(ImageHistory).filter(
-            ImageHistory.image_id == image_id,
-            ImageHistory.user_id == current_user_id
-        ).first()
+        conn = get_db()
+        c = conn.cursor()
+        
+        c.execute('SELECT * FROM image_history WHERE image_id = ? AND user_id = ?', (image_id, current_user_id))
+        image = c.fetchone()
+        conn.close()
         
         if not image:
             return jsonify({'error': 'Image not found'}), 404
         
         return send_file(
-            io.BytesIO(image.generated_image),
+            io.BytesIO(image['generated_image']),
             mimetype='image/png',
             as_attachment=True,
-            download_name=f"{image.original_filename or 'generated'}.png"
+            download_name=f"{image['original_filename'] or 'generated'}.png"
         )
     
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-    finally:
-        close_db(db)
 
 @app.route('/history/<image_id>', methods=['DELETE'])
 @token_required
 def delete_history_image(current_user_id, image_id):
-    db = get_db()
     try:
-        image = db.query(ImageHistory).filter(
-            ImageHistory.image_id == image_id,
-            ImageHistory.user_id == current_user_id
-        ).first()
+        conn = get_db()
+        c = conn.cursor()
         
-        if not image:
+        c.execute('DELETE FROM image_history WHERE image_id = ? AND user_id = ?', (image_id, current_user_id))
+        
+        if c.rowcount == 0:
+            conn.close()
             return jsonify({'error': 'Image not found'}), 404
         
-        db.delete(image)
-        db.commit()
+        conn.commit()
+        conn.close()
         
         return jsonify({'message': 'Image deleted successfully'}), 200
     
     except Exception as e:
-        db.rollback()
         return jsonify({'error': str(e)}), 500
-    finally:
-        close_db(db)
 
 @app.route('/history', methods=['DELETE'])
 @token_required
 def clear_history(current_user_id):
-    db = get_db()
     try:
-        deleted_count = db.query(ImageHistory).filter(
-            ImageHistory.user_id == current_user_id
-        ).delete()
+        conn = get_db()
+        c = conn.cursor()
         
-        db.commit()
+        c.execute('DELETE FROM image_history WHERE user_id = ?', (current_user_id,))
+        deleted_count = c.rowcount
+        
+        conn.commit()
+        conn.close()
         
         return jsonify({
             'message': 'History cleared successfully',
@@ -466,19 +598,19 @@ def clear_history(current_user_id):
         }), 200
     
     except Exception as e:
-        db.rollback()
         return jsonify({'error': str(e)}), 500
-    finally:
-        close_db(db)
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok', 'device': device})
+    return jsonify({
+        'status': 'ok', 
+        'device': device,
+        'gfpgan_available': gfpgan_available
+    })
 
 @app.route('/generate', methods=['POST'])
 @token_required
 def generate(current_user_id):
-    db = get_db()
     try:
         # Check if image file is present
         if 'image' not in request.files:
@@ -493,15 +625,20 @@ def generate(current_user_id):
         if quality not in QUALITY_PRESETS:
             quality = 'medium'
         
-        # Get attributes (fixed defaults - attributes have no effect on model output)
-        attributes = request.form.get('attributes', None)
+        # Get enhancement method (gfpgan or pil)
+        enhancement = request.form.get('enhancement', 'gfpgan')  # 'gfpgan' or 'pil'
+        use_gfpgan = enhancement == 'gfpgan' and gfpgan_available
         
-        if attributes:
-            attr_list = [int(x) for x in attributes.split(',')]
-            if len(attr_list) != 4:
-                return jsonify({'error': 'Attributes must be 4 values'}), 400
+        # Get attributes (optional - can be None)
+        attributes = request.form.get('attributes', None)
+        if attributes and attr_dim > 0:
+            attr_list = [float(x) for x in attributes.split(',')]
+            if len(attr_list) != attr_dim:
+                return jsonify({'error': f'Attributes must be {attr_dim} values'}), 400
+            attr_tensor = torch.tensor([attr_list], dtype=torch.float32).to(device)
         else:
-            attr_list = DEFAULT_ATTRIBUTES[:]
+            # No attributes or model doesn't use them - use zeros
+            attr_tensor = torch.zeros(1, max(attr_dim, 1), dtype=torch.float32).to(device)
         
         # Process image with preprocessing
         img = Image.open(file.stream).convert('RGB')
@@ -510,25 +647,29 @@ def generate(current_user_id):
         # Preprocess input
         img = preprocess_input_image(img)
         
+        # Create sketch tensor
         sketch_tensor = transform(img).unsqueeze(0).to(device)
-        attr_tensor = torch.tensor(attr_list).float().view(1, 4).to(device)
+        
+        # Create mask tensor (auto-masking)
+        mask_np = create_mask_from_sketch(img)
+        mask_tensor = torch.from_numpy(mask_np).float().unsqueeze(0).unsqueeze(0).to(device)
         
         # Generate
         with torch.no_grad():
-            output = model(sketch_tensor, attr_tensor)
+            output = model(sketch_tensor, mask_tensor, attr_tensor)
         
         # Denormalize and convert to PIL
         output = (output.squeeze().cpu() + 1) / 2
         output_img = T.ToPILImage()(output)
         
         # Apply post-processing enhancements
-        output_img = enhance_output_image(output_img, quality)
+        output_img = enhance_output_image(output_img, quality, use_gfpgan=use_gfpgan)
         
         # Optionally resize to larger size for better quality
         upscale = request.form.get('upscale', 'false').lower() == 'true'
         if upscale:
             # Upscale to 2x using high-quality resampling
-            new_size = (512, 512)
+            new_size = (1024, 1024)
             output_img = output_img.resize(new_size, Image.Resampling.LANCZOS)
         
         # Save to history if requested
@@ -541,18 +682,19 @@ def generate(current_user_id):
             img_bytes = img_io.getvalue()
             
             image_id = str(uuid.uuid4())
-            attr_str = ','.join(map(str, attr_list))
+            # Save attributes if provided, otherwise save "none"
+            if attributes:
+                attr_str = attributes
+            else:
+                attr_str = "none"
             
-            new_image = ImageHistory(
-                image_id=image_id,
-                user_id=current_user_id,
-                original_filename=file.filename,
-                generated_image=img_bytes,
-                attributes=attr_str
-            )
-            
-            db.add(new_image)
-            db.commit()
+            conn = get_db()
+            c = conn.cursor()
+            c.execute('''INSERT INTO image_history (image_id, user_id, original_filename, generated_image, attributes)
+                         VALUES (?, ?, ?, ?, ?)''',
+                      (image_id, current_user_id, file.filename, img_bytes, attr_str))
+            conn.commit()
+            conn.close()
         
         # Return format
         return_format = request.form.get('format', 'image')  # 'image' or 'base64'
@@ -567,6 +709,7 @@ def generate(current_user_id):
                 'image': img_str, 
                 'format': 'base64',
                 'quality': quality,
+                'enhancement': 'gfpgan' if use_gfpgan else 'pil',
                 'size': output_img.size
             }
             if image_id:
@@ -581,15 +724,11 @@ def generate(current_user_id):
             return send_file(img_io, mimetype='image/png')
     
     except Exception as e:
-        db.rollback()
         return jsonify({'error': str(e)}), 500
-    finally:
-        close_db(db)
 
 @app.route('/generate-batch', methods=['POST'])
 @token_required
 def generate_batch(current_user_id):
-    db = get_db()
     try:
         if 'images' not in request.files:
             return jsonify({'error': 'No images provided'}), 400
@@ -599,21 +738,29 @@ def generate_batch(current_user_id):
         quality = request.form.get('quality', 'medium')
         upscale = request.form.get('upscale', 'false').lower() == 'true'
         
+        # Get enhancement method
+        enhancement = request.form.get('enhancement', 'gfpgan')
+        use_gfpgan = enhancement == 'gfpgan' and gfpgan_available
+        
         if quality not in QUALITY_PRESETS:
             quality = 'medium'
         
-        if attributes:
-            attr_list = [int(x) for x in attributes.split(',')]
-            if len(attr_list) != 4:
-                return jsonify({'error': 'Attributes must be 4 values'}), 400
+        if attributes and attr_dim > 0:
+            attr_list = [float(x) for x in attributes.split(',')]
+            if len(attr_list) != attr_dim:
+                return jsonify({'error': f'Attributes must be {attr_dim} values'}), 400
+            attr_tensor = torch.tensor([attr_list], dtype=torch.float32).to(device)
         else:
-            attr_list = [1, 0, 1, 0]
+            # No attributes or model doesn't use them - use zeros
+            attr_tensor = torch.zeros(1, max(attr_dim, 1), dtype=torch.float32).to(device)
         
         results = []
-        attr_tensor = torch.tensor(attr_list).float().view(1, 4).to(device)
-        attr_str = ','.join(map(str, attr_list))
+        attr_str = ','.join(map(str, attr_list if attributes else [0.0, 0.0, 0.0, 0.0]))
         
         save_to_history = request.form.get('save', 'false').lower() == 'true'
+        
+        conn = get_db() if save_to_history else None
+        c = conn.cursor() if conn else None
         
         for file in files:
             img = Image.open(file.stream).convert('RGB')
@@ -623,18 +770,22 @@ def generate_batch(current_user_id):
             
             sketch_tensor = transform(img).unsqueeze(0).to(device)
             
+            # Create mask
+            mask_np = create_mask_from_sketch(img)
+            mask_tensor = torch.from_numpy(mask_np).float().unsqueeze(0).unsqueeze(0).to(device)
+            
             with torch.no_grad():
-                output = model(sketch_tensor, attr_tensor)
+                output = model(sketch_tensor, mask_tensor, attr_tensor)
             
             output = (output.squeeze().cpu() + 1) / 2
             output_img = T.ToPILImage()(output)
             
             # Apply post-processing enhancements
-            output_img = enhance_output_image(output_img, quality)
+            output_img = enhance_output_image(output_img, quality, use_gfpgan=use_gfpgan)
             
             # Optionally upscale
             if upscale:
-                new_size = (512, 512)
+                new_size = (1024, 1024)
                 output_img = output_img.resize(new_size, Image.Resampling.LANCZOS)
             
             buffered = io.BytesIO()
@@ -646,36 +797,28 @@ def generate_batch(current_user_id):
                 'filename': file.filename, 
                 'image': img_str,
                 'quality': quality,
+                'enhancement': 'gfpgan' if use_gfpgan else 'pil',
                 'size': output_img.size
             }
             
             if save_to_history:
                 image_id = str(uuid.uuid4())
-                
-                new_image = ImageHistory(
-                    image_id=image_id,
-                    user_id=current_user_id,
-                    original_filename=file.filename,
-                    generated_image=img_bytes,
-                    attributes=attr_str
-                )
-                
-                db.add(new_image)
+                c.execute('''INSERT INTO image_history (image_id, user_id, original_filename, generated_image, attributes)
+                             VALUES (?, ?, ?, ?, ?)''',
+                          (image_id, current_user_id, file.filename, img_bytes, attr_str))
                 result['image_id'] = image_id
                 result['saved'] = True
             
             results.append(result)
         
-        if save_to_history:
-            db.commit()
+        if conn:
+            conn.commit()
+            conn.close()
         
         return jsonify({'results': results, 'count': len(results)})
     
     except Exception as e:
-        db.rollback()
         return jsonify({'error': str(e)}), 500
-    finally:
-        close_db(db)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)

@@ -5,7 +5,8 @@ The Pencil2Pixel API converts pencil sketches into realistic images using a UNet
 
 **Base URL:** `http://localhost:5000`
 
-**Model:** UNet Generator with 20 attribute dimensions
+**Model:** SketchToImageGenerator with 4-channel input (RGB + Mask) and 4 tone attributes
+**Resolution:** 512x512 (can upscale to 1024x1024)
 **Device:** CUDA (if available) or CPU
 
 ---
@@ -197,7 +198,7 @@ Authorization: Bearer <token>
 
 **Endpoint:** `GET /health`
 
-**Description:** Check the API health status and device information.
+**Description:** Check the API health status, device information, and GFPGAN availability.
 
 **Request:**
 ```http
@@ -209,12 +210,23 @@ Host: localhost:5000
 ```json
 {
   "status": "ok",
-  "device": "cuda"
+  "device": "cuda",
+  "gfpgan_available": true
 }
 ```
 
+**Response Fields:**
+- `status`: API health status (`ok` or `error`)
+- `device`: Computation device (`cuda` for GPU, `cpu` for CPU)
+- `gfpgan_available`: Whether GFPGAN enhancement is available (`true` or `false`)
+
 **Status Codes:**
 - `200 OK` - Service is healthy
+
+**Example cURL:**
+```bash
+curl http://localhost:5000/health
+```
 
 ---
 
@@ -222,7 +234,7 @@ Host: localhost:5000
 
 **Endpoint:** `POST /generate`
 
-**Description:** Convert a single pencil sketch to a realistic image. Requires authentication.
+**Description:** Convert a single pencil sketch to a realistic image with optional GFPGAN enhancement. Requires authentication.
 
 **Headers:**
 ```
@@ -243,7 +255,11 @@ Content-Type: image/png
 --boundary
 Content-Disposition: form-data; name="attributes"
 
-0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+0.25,0.75,0.33,0.33
+--boundary
+Content-Disposition: form-data; name="enhancement"
+
+gfpgan
 --boundary
 Content-Disposition: form-data; name="format"
 
@@ -255,14 +271,47 @@ image
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `image` | file | Yes | Pencil sketch image file (PNG, JPG, etc.) |
-| `attributes` | string | No | 20 comma-separated integer values for controlling generation. Default: `1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0` |
+| `image` | file | Yes | Pencil sketch image file (PNG, JPG, JPEG, BMP, WEBP). Max recommended size: 10MB |
+| `attributes` | string | No | 4 comma-separated float values (0.0-1.0) for tone control: `skin,hair,eye,lip`. Default: `0.0,0.0,0.0,0.0` |
+| `enhancement` | string | No | Enhancement method: `gfpgan` (AI-based face restoration) or `pil` (traditional filters). Default: `gfpgan` |
 | `format` | string | No | Response format: `image` (PNG file) or `base64` (JSON). Default: `image` |
+| `quality` | string | No | Quality preset for PIL enhancement: `low`, `medium`, `high`, `ultra`. Default: `medium`. Only used when `enhancement=pil` |
+| `upscale` | string | No | Set to `true` to upscale output to 1024x1024. Default: `false` |
 | `save` | string | No | Set to `true` to save image to history. Default: `false` |
-| `quality` | string | No | Quality preset: `low`, `medium`, `high`, `ultra`. Default: `medium` |
-| `upscale` | string | No | Set to `true` to upscale output to 512x512. Default: `false` |
 
-> **Note:** The model architecture includes an attribute conditioning vector, but due to InstanceNorm in the network, attributes have no measurable effect on the generated output. The parameter is retained for API compatibility.
+**Image Validation:**
+
+The API accepts the following image formats:
+- **Supported formats:** PNG, JPG, JPEG, BMP, WEBP, TIFF
+- **Recommended format:** PNG or JPG
+- **Color mode:** Automatically converted to RGB
+- **Size:** Any size (automatically resized to 512x512 for processing)
+- **Max file size:** No hard limit, but 10MB recommended for performance
+- **Aspect ratio:** Any (will be resized maintaining aspect ratio, then center-cropped to square)
+
+**Image Preprocessing:**
+1. Convert to RGB color mode
+2. Apply median filter denoising (3x3 kernel)
+3. Slight contrast enhancement (1.05x)
+4. Resize to 512x512 pixels
+5. Auto-masking to separate sketch from background
+
+**Enhancement Methods:**
+
+1. **GFPGAN Enhancement** (`enhancement=gfpgan`, default):
+   - AI-based face restoration and enhancement
+   - Significantly improves facial details, skin texture, and overall quality
+   - Automatically downloads model weights on first use (~350MB)
+   - Best for portrait sketches and faces
+   - Falls back to PIL enhancement if GFPGAN unavailable
+   - **Recommended for production use**
+
+2. **PIL Enhancement** (`enhancement=pil`):
+   - Traditional image processing filters
+   - Sharpness, contrast, and color adjustments
+   - Faster processing, no model download required
+   - Quality controlled by `quality` parameter
+   - Good for non-portrait sketches or when GFPGAN unavailable
 
 **Response (format=image):**
 - Content-Type: `image/png`
@@ -274,19 +323,30 @@ image
   "image": "iVBORw0KGgoAAAANSUhEUgAA...",
   "format": "base64",
   "quality": "medium",
-  "size": [256, 256],
+  "enhancement": "gfpgan",
+  "size": [512, 512],
   "image_id": "550e8400-e29b-41d4-a716-446655440000",
   "saved": true
 }
 ```
 
-**Note:** `image_id` and `saved` fields only appear when `save=true`. The `size` field returns `[512, 512]` when `upscale=true`.
+**Response Fields:**
+- `image`: Base64-encoded PNG image (only when `format=base64`)
+- `format`: Response format (`base64`)
+- `quality`: Quality preset used (only relevant for PIL enhancement)
+- `enhancement`: Enhancement method used (`gfpgan` or `pil`)
+- `size`: Output image dimensions `[width, height]`
+- `image_id`: Unique ID of saved image (only when `save=true`)
+- `saved`: Whether image was saved to history (only when `save=true`)
 
 **Error Responses:**
 ```json
 {"error": "No image file provided"}
 {"error": "Empty filename"}
-{"error": "Attributes must be 20 values"}
+{"error": "Attributes must be 4 values"}
+{"error": "Token is missing"}
+{"error": "Token has expired"}
+{"error": "Invalid token"}
 ```
 
 **Status Codes:**
@@ -295,23 +355,96 @@ image
 - `401 Unauthorized` - Invalid or missing token
 - `500 Internal Server Error` - Processing error
 
-**Example cURL:**
+**Example cURL (GFPGAN Enhancement):**
 ```bash
-# Using raw attributes
+# Generate with GFPGAN enhancement (default)
 curl -X POST http://localhost:5000/generate \
   -H "Authorization: Bearer <token>" \
   -F "image=@sketch.png" \
-  -F "attributes=1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0" \
+  -F "attributes=0.25,0.75,0.33,0.33" \
+  -F "enhancement=gfpgan" \
   -F "format=image" \
   --output result.png
 
-# Return base64 JSON and save to history (uses default attributes)
+# Generate with GFPGAN and upscaling
+curl -X POST http://localhost:5000/generate \
+  -H "Authorization: Bearer <token>" \
+  -F "image=@sketch.jpg" \
+  -F "enhancement=gfpgan" \
+  -F "upscale=true" \
+  --output result_hd.png
+
+# Generate with PIL enhancement (fallback)
+curl -X POST http://localhost:5000/generate \
+  -H "Authorization: Bearer <token>" \
+  -F "image=@sketch.png" \
+  -F "enhancement=pil" \
+  -F "quality=high" \
+  --output result.png
+
+# Return base64 JSON and save to history
 curl -X POST http://localhost:5000/generate \
   -H "Authorization: Bearer <token>" \
   -F "image=@sketch.png" \
   -F "format=base64" \
   -F "save=true"
 ```
+
+**Example Python:**
+```python
+import requests
+
+BASE_URL = 'http://localhost:5000'
+headers = {'Authorization': f'Bearer {token}'}
+
+# Generate with GFPGAN
+with open('sketch.png', 'rb') as f:
+    files = {'image': f}
+    data = {
+        'attributes': '0.25,0.75,0.33,0.33',
+        'enhancement': 'gfpgan',
+        'format': 'base64',
+        'save': 'true'
+    }
+    response = requests.post(f'{BASE_URL}/generate', 
+                            files=files, data=data, headers=headers)
+    result = response.json()
+    print(f"Enhancement used: {result['enhancement']}")
+    print(f"Image ID: {result['image_id']}")
+```
+
+**Example JavaScript:**
+```javascript
+const formData = new FormData();
+formData.append('image', fileInput.files[0]);
+formData.append('attributes', '0.25,0.75,0.33,0.33');
+formData.append('enhancement', 'gfpgan');
+formData.append('format', 'base64');
+formData.append('save', 'true');
+
+const response = await fetch('http://localhost:5000/generate', {
+  method: 'POST',
+  headers: { 'Authorization': `Bearer ${token}` },
+  body: formData
+});
+
+const data = await response.json();
+console.log('Enhancement:', data.enhancement);
+console.log('Image:', data.image); // base64 string
+```
+
+**Performance Notes:**
+- **GFPGAN first run:** Downloads model weights (~350MB), takes 30-60 seconds
+- **GFPGAN subsequent runs:** 2-5 seconds per image (CPU), <1 second (GPU)
+- **PIL enhancement:** <1 second per image
+- **Upscaling:** Adds ~0.5 seconds processing time
+- **GPU acceleration:** Significantly faster with CUDA-enabled GPU
+
+**Troubleshooting:**
+- If GFPGAN fails to load, API automatically falls back to PIL enhancement
+- Check `/health` endpoint to verify `gfpgan_available: true`
+- Ensure sufficient disk space for model weights (~350MB)
+- For CPU-only systems, GFPGAN may be slower; consider using `enhancement=pil`
 
 ---
 
@@ -354,10 +487,10 @@ Content-Disposition: form-data; name="attributes"
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `images` | file[] | Yes | Multiple pencil sketch image files |
-| `attributes` | string | No | 20 comma-separated integer values applied to all images. Default: `1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0` |
+| `attributes` | string | No | 4 comma-separated float values (0.0-1.0) for tone control: `skin,hair,eye,lip`. Optional - model works without it |
 | `save` | string | No | Set to `true` to save all images to history. Default: `false` |
 | `quality` | string | No | Quality preset: `low`, `medium`, `high`, `ultra`. Default: `medium` |
-| `upscale` | string | No | Set to `true` to upscale outputs to 512x512. Default: `false` |
+| `upscale` | string | No | Set to `true` to upscale outputs to 1024x1024. Default: `false` |
 
 **Response:**
 ```json
@@ -406,7 +539,7 @@ curl -X POST http://localhost:5000/generate-batch \
   -F "images=@sketch1.png" \
   -F "images=@sketch2.png" \
   -F "images=@sketch3.png" \
-  -F "attributes=1,0,1,0,1,0,0,1,1,0,0,1,0,1,0,0,1,1,0,0" \
+  -F "attributes=0.4,0.6,0.3,0.5" \
   -F "save=true"
 ```
 
@@ -596,9 +729,18 @@ curl -X POST http://localhost:5000/generate \
 
 ## Attributes
 
-The model architecture accepts a 20-element binary attribute vector that is injected at the bottleneck layer of the UNet Generator. However, **testing has confirmed that attributes have no measurable effect on the generated output** — all attribute vectors produce byte-for-byte identical images. This is because the InstanceNorm layer normalizes out the 1×1 spatial signal from the attribute conditioning.
+The new model architecture uses a 4-channel input (RGB + Mask) and accepts 4 floating-point tone attributes:
 
-The `attributes` parameter is retained in the API for compatibility but can be safely ignored. Default values are used automatically if omitted.
+1. **skin_tone** (0.0-1.0): Skin tone control
+2. **hair_tone** (0.0-1.0): Hair tone control  
+3. **eye_tone** (0.0-1.0): Eye tone control
+4. **lip_tone** (0.0-1.0): Lip tone control
+
+**Default values:** `[0.25, 0.75, 0.33, 0.33]`
+
+The `attributes` parameter is optional. If not provided, the model uses zero values `[0.0, 0.0, 0.0, 0.0]` which allows the model to generate images based purely on the sketch input without tone conditioning.
+
+**Note:** Attributes were used during training but are optional during inference. The model can generate high-quality images without explicit attribute values.
 
 ---
 
@@ -618,7 +760,7 @@ All endpoints return JSON error responses with appropriate HTTP status codes:
 - `Invalid token` (401) - Malformed or invalid JWT token
 - `No image file provided` (400) - Missing image in request
 - `Empty filename` (400) - File uploaded without name
-- `Attributes must be 20 values` (400) - Invalid attribute count
+- `Attributes must be 4 values (skin_tone, hair_tone, eye_tone, lip_tone)` (400) - Invalid attribute count
 - `No images provided` (400) - Missing images in batch request
 - `Username, email, and password are required` (400) - Missing signup fields
 - `Email and password are required` (400) - Missing login fields
@@ -640,13 +782,14 @@ All endpoints return JSON error responses with appropriate HTTP status codes:
 **Input Requirements:**
 - Format: Any PIL-supported format (PNG, JPG, etc.)
 - Recommended: RGB images
-- The API automatically resizes images to 256x256 pixels
+- The API automatically resizes images to 512x512 pixels
+- Auto-masking is applied to separate sketch from background
 
 **Output:**
 - Format: PNG
-- Size: 256x256 pixels
+- Size: 512x512 pixels (1024x1024 with upscale=true)
 - Color space: RGB
-- Normalization: Applied during processing, denormalized in output
+- Post-processing: Sharpening, contrast enhancement, color boost (based on quality preset)
 
 **Processing Pipeline:**
 1. Image loaded and converted to RGB
@@ -677,9 +820,9 @@ All endpoints return JSON error responses with appropriate HTTP status codes:
 - Dropout in early layers (0.5)
 
 **Attribute Integration:**
-- 20-dimensional attribute vector
-- Concatenated at bottleneck layer
-- Influences generation characteristics
+- 4-dimensional tone attribute vector (skin, hair, eye, lip)
+- Concatenated at bottleneck layer (d8)
+- Optional - can use zero values for pure sketch-based generation
 
 ---
 
